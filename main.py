@@ -1,109 +1,62 @@
 import asyncio
-import re
-import logging
-from typing import Optional
-
 from telebot.async_telebot import AsyncTeleBot
-from telebot.types import Message
-from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeout
+from extractor import extrair_chave_lootlabs
 
-# -------------------- CONFIGURAÇÕES --------------------
-TOKEN_TELEGRAM = "8844866824:AAHqi07q32D4DxFMJ1NrHBqQzGk1c-0tyDw"          # Token do bot no Telegram
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-VIEWPORT = {"width": 1366, "height": 768}
-TIMEOUT_PAGINA = 45000                     # 45s para carregamento geral
-TIMEOUT_ELEMENTO = 10000                   # 10s para botões aparecerem
-MAX_TENTATIVAS = 2                         # Retry em caso de falha
+# Substitua pelo token do seu bot (obtido via @BotFather)
+TOKEN = "8844866824:AAHqi07q32D4DxFMJ1NrHBqQzGk1c-0tyDw"
 
-# -------------------- LOGGING --------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+bot = AsyncTeleBot(TOKEN)
 
+# -------------------------------------------------------
+# Comando /start
+# -------------------------------------------------------
+@bot.message_handler(commands=['start'])
+async def cmd_start(mensagem):
+    texto = (
+        "👋 Olá! Envie um link do **LootLabs** (ou encurtador similar) e eu extraio a chave `FREE_...` para você.\n\n"
+        "Exemplo de link: `https://lootlabs.xyz/...`\n\n"
+        "Processo pode levar alguns segundos. Aguarde."
+    )
+    await bot.reply_to(mensagem, texto, parse_mode="Markdown")
 
-# -------------------- FUNÇÃO STEALTH MANUAL --------------------
-async def aplicar_stealth_manual(pagina: Page):
-    """
-    Injeção manual de scripts anti-detecção para substituir o playwright_stealth.
-    Compatível com PythonAnywhere e ambientes restritos.
-    """
-    await pagina.add_init_script("""
-        // 1. Remover flag webdriver
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-        });
+# -------------------------------------------------------
+# Mensagens com links
+# -------------------------------------------------------
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("http"))
+async def processar_link(mensagem):
+    url = mensagem.text.strip()
+    # Feedback imediato
+    msg_status = await bot.reply_to(mensagem, "🔍 Acessando link e contornando proteções...")
 
-        // 2. Sobrescrever plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
+    try:
+        chave = await extrair_chave_lootlabs(url)
+        resposta = f"✅ Chave encontrada:\n`{chave}`"
+    except RuntimeError as erro:
+        # Erro após todas as tentativas
+        resposta = f"❌ {erro}"
+    except ValueError as erro:
+        # Chave não encontrada (site mudou)
+        resposta = f"⚠️ {erro}"
+    except Exception as erro:
+        # Outros erros inesperados
+        resposta = f"🔥 Erro inesperado: {erro}"
 
-        // 3. Sobrescrever languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['pt-BR', 'pt'],
-        });
+    # Edita a mensagem de status com o resultado final
+    await bot.edit_message_text(resposta, chat_id=msg_status.chat.id, message_id=msg_status.message_id, parse_mode="Markdown")
 
-        // 4. Adicionar objeto chrome
-        window.chrome = { runtime: {} };
+# -------------------------------------------------------
+# Tratamento de qualquer outra mensagem
+# -------------------------------------------------------
+@bot.message_handler(func=lambda m: True)
+async def texto_nao_link(mensagem):
+    await bot.reply_to(mensagem, "Por favor, envie um link HTTP(s) válido.")
 
-        // 5. Permissões: evitar detecção por Notification.permission
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-            Promise.resolve({ state: Notification.permission }) :
-            originalQuery(parameters)
-        );
-
-        // 6. Sobrescrever o cabeçalho Accept-Language via fetch
-        const originalFetch = window.fetch;
-        window.fetch = function(url, options = {}) {
-            if (!options.headers) {
-                options.headers = {};
-            }
-            options.headers['Accept-Language'] = 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
-            return originalFetch.call(this, url, options);
-        };
-    """)
-
-
-# -------------------- EXCEÇÕES PERSONALIZADAS --------------------
-class ExtracaoErro(Exception):
-    """Erro genérico na extração."""
-    pass
-
-class CloudflareBloqueio(ExtracaoErro):
-    """Detectado bloqueio explícito do Cloudflare."""
-    pass
-
-class ChaveNaoEncontrada(ExtracaoErro):
-    """A chave FREE_* não foi localizada em nenhuma estratégia."""
-    pass
-
-class TimeoutCarregamento(ExtracaoErro):
-    """Timeout ao aguardar página ou elemento."""
-    pass
-
-
-# -------------------- EXTRATOR DE CHAVES --------------------
-class KeyExtractor:
-    """
-    Gerencia uma instância do navegador Playwright com evasão de detecção manual.
-    Oferece um método assíncrono para percorrer o fluxo do LootLabs e extrair a chave.
-    """
-
-    def __init__(self):
-        self.browser: Optional[Browser] = None
-        self.playwright = None
-
-    async def iniciar(self):
-        """Lançar o navegador com configurações anti-detecção."""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
+# -------------------------------------------------------
+# Ponto de entrada
+# -------------------------------------------------------
+if __name__ == "__main__":
+    print("🤖 Bot iniciado...")
+    asyncio.run(bot.polling(non_stop=True))                "--disable-setuid-sandbox",
                 "--disable-infobars",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
